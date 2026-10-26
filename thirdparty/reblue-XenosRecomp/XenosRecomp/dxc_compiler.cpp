@@ -11,7 +11,7 @@ DxcCompiler::~DxcCompiler()
     dxcCompiler->Release();
 }
 
-IDxcBlob* DxcCompiler::compile(const std::string& shaderSource, bool compilePixelShader, bool compileLibrary, bool compileSpirv)
+IDxcBlob* DxcCompiler::compile(const std::string& shaderSource, bool compilePixelShader, bool compileLibrary, bool compileSpirv, int metalExpansion)
 {
     DxcBuffer source{};
     source.Ptr = shaderSource.c_str();
@@ -19,6 +19,8 @@ IDxcBlob* DxcCompiler::compile(const std::string& shaderSource, bool compilePixe
 
     const wchar_t* args[32]{};
     uint32_t argCount = 0;
+    if (metalExpansion)
+        args[argCount++] = metalExpansion == 1 ? L"-DRENUT_METAL_EXPANSION=1" : L"-DRENUT_METAL_EXPANSION=2";
 
     const wchar_t* target = nullptr;
     if (compileLibrary)

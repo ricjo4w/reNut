@@ -1,4 +1,6 @@
 project(dxc-bin)
+set(DXC_BIN_ROOT "${PROJECT_SOURCE_DIR}" CACHE PATH "DXC binary distribution (including macOS libraries)")
+set(PROJECT_SOURCE_DIR "${DXC_BIN_ROOT}")
 
 if (CMAKE_OSX_ARCHITECTURES)
     set(DXC_ARCHITECTURE ${CMAKE_OSX_ARCHITECTURES})

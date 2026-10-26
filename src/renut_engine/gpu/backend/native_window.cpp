@@ -12,6 +12,9 @@
 
 #include <SDL3/SDL_properties.h>
 #include <SDL3/SDL_video.h>
+#if defined(__APPLE__)
+#include <SDL3/SDL_metal.h>
+#endif
 #endif
 
 namespace renut::gpu {
@@ -73,10 +76,12 @@ namespace {
 // Runs before main, so before the SDK initialises SDL. plume builds its Vulkan
 // surface with VK_KHR_xlib_surface, which needs the X11 video driver (XWayland
 // on Wayland sessions). An explicit user setting is left alone.
+#if defined(__linux__)
 [[maybe_unused]] const bool kPreferX11 = [] {
   setenv("SDL_VIDEO_DRIVER", "x11", 0);
   return true;
 }();
+#endif
 
 // The app owns one window.
 SDL_Window *FindGameSdlWindow() {
@@ -97,6 +102,15 @@ bool GetNativeRenderWindow(plume::RenderWindow &out) {
   }
 
   const SDL_PropertiesID props = SDL_GetWindowProperties(sdl_window);
+#if defined(__APPLE__)
+  static SDL_MetalView view = SDL_Metal_CreateView(sdl_window);
+  out.window = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, nullptr);
+  out.view = view ? SDL_Metal_GetLayer(view) : nullptr;
+  if (!out.window || !out.view) {
+    RGPU_ERROR("Cannot create Cocoa Metal surface: {}", SDL_GetError());
+    return false;
+  }
+#else
   out.display = static_cast<Display *>(
       SDL_GetPointerProperty(props, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, nullptr));
   out.window = static_cast<Window>(
@@ -107,6 +121,7 @@ bool GetNativeRenderWindow(plume::RenderWindow &out) {
                SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "none");
     return false;
   }
+#endif
   return true;
 }
 

@@ -1,3 +1,7 @@
+#if defined(__APPLE__)
+#include "host_shaders/overlay_ps.metal.h"
+#include "host_shaders/overlay_vs.metal.h"
+#endif
 /**
  * @file    gpu/overlay/overlay_drawer.cpp
  */

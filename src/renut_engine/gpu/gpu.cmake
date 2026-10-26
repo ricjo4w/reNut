@@ -16,9 +16,12 @@ set(RENUT_SHADER_DUMP_DIR "${CMAKE_SOURCE_DIR}/shaders" CACHE PATH
     "Directory of dumped Xenos shader containers (tools/dump_shaders.py output)")
 set(RENUT_ASSETS_DIR "${CMAKE_SOURCE_DIR}/assets" CACHE PATH
     "Game assets the shaders are dumped from (default.xex and Bundle/)")
-set(RENUT_SHADER_CAPTURE_DIR "${CMAKE_BINARY_DIR}/shader_capture" CACHE PATH
-    "Where reNut, run from the build directory, captures shaders its cache lacks "
-    "(renut_shader_capture_dir); the build adds them to RENUT_SHADER_DUMP_DIR")
+set(renut_capture_default "${CMAKE_BINARY_DIR}/shader_capture")
+if(APPLE)
+    set(renut_capture_default "$ENV{HOME}/Library/Application Support/renut/shader_capture")
+endif()
+set(RENUT_SHADER_CAPTURE_DIR "${renut_capture_default}" CACHE PATH
+    "Where reNut captures shaders its cache lacks (renut_shader_capture_dir)")
 
 # tools/dump_shaders.py, which runs when there are no dumped shaders yet
 # (renut_xenos_shader_cache), needs Python 3 with the xxhash module.
@@ -35,6 +38,9 @@ endif()
 # plume is read-only and vendored; build it as-is.
 if(NOT TARGET plume)
     add_subdirectory("${CMAKE_SOURCE_DIR}/thirdparty/plume" "${CMAKE_BINARY_DIR}/plume")
+endif()
+if(APPLE)
+    include("${CMAKE_SOURCE_DIR}/cmake/plume_metal.cmake")
 endif()
 
 # The shader cache is zstd-compressed and its SPIR-V is smol-v encoded. Only the
@@ -64,9 +70,18 @@ set_target_properties(renut_smolv PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # ---------------------------------------------------------------------------
 # DXC: the copy vendored with XenosRecomp covers Windows and Linux.
 # ---------------------------------------------------------------------------
-set(RENUT_DXC_BIN_DIR "${RENUT_XENOS_RECOMP_DIR}/thirdparty/dxc-bin/bin/x64")
+set(RENUT_DXC_ROOT "${RENUT_XENOS_RECOMP_DIR}/thirdparty/dxc-bin" CACHE PATH "Native DXC distribution")
+set(RENUT_DXC_BIN_DIR "${RENUT_DXC_ROOT}/bin/x64")
 if(WIN32)
     set(RENUT_DXC "${RENUT_DXC_BIN_DIR}/dxc.exe")
+elseif(APPLE)
+    set(RENUT_DXC_ARCH arm64)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+        set(RENUT_DXC_ARCH x64)
+    endif()
+    set(RENUT_DXC ${CMAKE_COMMAND} -E env "DYLD_LIBRARY_PATH=${RENUT_DXC_ROOT}/lib/${RENUT_DXC_ARCH}"
+        "${RENUT_DXC_ROOT}/bin/${RENUT_DXC_ARCH}/dxc-macos")
+    include("${CMAKE_SOURCE_DIR}/cmake/metal.cmake")
 else()
     # The Linux binary finds libdxcompiler next to it.
     set(RENUT_DXC env "LD_LIBRARY_PATH=${RENUT_XENOS_RECOMP_DIR}/thirdparty/dxc-bin/lib/x64" "${RENUT_DXC_BIN_DIR}/dxc-linux")
@@ -104,6 +119,19 @@ function(renut_host_shader TARGET STEM PROFILE)
             COMMENT "Compiling host shader ${STEM}.hlsl (${PROFILE}, ${fmt})"
             VERBATIM)
         target_sources(${TARGET} PRIVATE "${out}")
+        if(APPLE AND NOT PROFILE MATCHES "^gs")
+            set(spv "${RENUT_GPU_GEN_DIR}/host_shaders/${STEM}.spv")
+            set(metal_out "${RENUT_GPU_GEN_DIR}/host_shaders/${STEM}.metal.h")
+            add_custom_command(OUTPUT "${metal_out}"
+                COMMAND ${RENUT_DXC} -T ${PROFILE} -E main -HV 2021 -all-resources-bound
+                    ${format_args} -Fo "${spv}" "${src}"
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/compile_metal.py"
+                    host --input "${spv}" --output "${metal_out}" --symbol "g_${STEM}_metal"
+                    --converter $<TARGET_FILE:renut_spirv_to_metal>
+                DEPENDS "${out}" renut_spirv_to_metal "${CMAKE_SOURCE_DIR}/tools/compile_metal.py"
+                VERBATIM)
+            target_sources(${TARGET} PRIVATE "${metal_out}")
+        endif()
     endforeach()
 endfunction()
 
@@ -138,6 +166,7 @@ function(renut_xenos_shader_cache TARGET)
             -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
             -DXENOS_RECOMP_RENUT=ON
             -DXENOS_RECOMP_DXIL=${recomp_dxil}
+            -DDXC_BIN_ROOT=${RENUT_DXC_ROOT}
         BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target XenosRecomp --config Release
         INSTALL_COMMAND ""
         BUILD_BYPRODUCTS "${recomp_exe}"
@@ -178,7 +207,7 @@ function(renut_xenos_shader_cache TARGET)
         COMMAND ${CMAKE_COMMAND} -E make_directory "${RENUT_GPU_GEN_DIR}"
         COMMAND "${recomp_exe}" "${RENUT_SHADER_DUMP_DIR}" "${cache_cpp}"
                 "${RENUT_SHADER_COMMON_DIR}/shader_common.h"
-        DEPENDS renut_xenos_recomp "${recomp_exe}" "${RENUT_SHADER_COMMON_DIR}/shader_common.h"
+        DEPENDS "${recomp_exe}" "${RENUT_SHADER_COMMON_DIR}/shader_common.h"
                 "${CMAKE_SOURCE_DIR}/cmake/collect_captured_shaders.cmake"
                 ${dump_outputs} ${shader_inputs} ${captured_inputs}
         COMMENT "Recompiling Xenos shaders (RENUT_RECOMP) from ${RENUT_SHADER_DUMP_DIR}"
@@ -186,8 +215,19 @@ function(renut_xenos_shader_cache TARGET)
 
     # 3. Compile into the executable.
     add_custom_target(renut_shader_cache_gen DEPENDS "${cache_cpp}")
+    add_dependencies(renut_shader_cache_gen renut_xenos_recomp)
     add_dependencies(${TARGET} renut_shader_cache_gen)
     target_sources(${TARGET} PRIVATE "${cache_cpp}")
+    if(APPLE)
+        set(metal_cache "${RENUT_GPU_GEN_DIR}/metal_shader_cache.cpp")
+        add_custom_command(OUTPUT "${metal_cache}"
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/compile_metal.py"
+                cache --input "${RENUT_GPU_GEN_DIR}/metal_spirv" --output "${metal_cache}"
+                --converter $<TARGET_FILE:renut_spirv_to_metal>
+            DEPENDS "${cache_cpp}" renut_spirv_to_metal "${CMAKE_SOURCE_DIR}/tools/compile_metal.py"
+            USES_TERMINAL VERBATIM)
+        target_sources(${TARGET} PRIVATE "${metal_cache}")
+    endif()
     # The generated file is large and only holds byte arrays.
     set_source_files_properties("${cache_cpp}" PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 endfunction()
@@ -196,7 +236,6 @@ endfunction()
 function(renut_gpu_setup TARGET)
     target_sources(${TARGET} PRIVATE
         # The host device, the frame and the render thread.
-        ${RENUT_GPU_DIR}/backend/backend.cpp
         ${RENUT_GPU_DIR}/backend/gpu_profile.cpp
         ${RENUT_GPU_DIR}/backend/memory_report.cpp
         ${RENUT_GPU_DIR}/backend/native_window.cpp
@@ -232,6 +271,14 @@ function(renut_gpu_setup TARGET)
         ${RENUT_GPU_DIR}/render/textures.cpp
         ${RENUT_GPU_DIR}/render/upload_ring.cpp
         ${RENUT_GPU_DIR}/render/vertex_format.cpp)
+    if(APPLE)
+        target_sources(${TARGET} PRIVATE ${RENUT_GPU_DIR}/backend/backend_metal.cpp)
+        target_include_directories(${TARGET} PRIVATE "${CMAKE_SOURCE_DIR}/thirdparty/plume/contrib/metal-cpp")
+        target_link_libraries(${TARGET} PRIVATE "-framework Metal" "-framework QuartzCore"
+            "-framework Foundation" "-framework AppKit" "-framework IOKit" z)
+    else()
+        target_sources(${TARGET} PRIVATE ${RENUT_GPU_DIR}/backend/backend.cpp)
+    endif()
 
     renut_host_shader(${TARGET} overlay_vs vs_6_0)
     renut_host_shader(${TARGET} overlay_ps ps_6_0)

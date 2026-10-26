@@ -1,0 +1,76 @@
+--- a/plume_metal.cpp
++++ b/plume_metal.cpp
+@@ -2812,12 +2812,8 @@
+             if (RenderFormatIsStencil(targetFramebuffer->depthAttachment.format)) {
+                 pipelineDesc->setStencilAttachmentPixelFormat(pipelineDesc->depthAttachmentPixelFormat());
+             }
+-            MTL::DepthStencilDescriptor *depthStencilDescriptor = MTL::DepthStencilDescriptor::alloc()->init();
+-            depthStencilDescriptor->setDepthWriteEnabled(false);
+-            const MTL::DepthStencilState *depthStencilState = device->mtl->newDepthStencilState(depthStencilDescriptor);
+-            activeRenderEncoder->setDepthStencilState(depthStencilState);
+-
+-            depthStencilDescriptor->release();
++            // Reuse a device-owned state; allocating here leaked one per clear.
++            activeRenderEncoder->setDepthStencilState(device->clearColorDepthState);
+         }
+ 
+         const MTL::RenderPipelineState *pipelineState = device->getOrCreateClearRenderPipelineState(pipelineDesc);
+@@ -3022,6 +3018,17 @@
+                 dstOrigin
+             );
+             activeBlitEncoder->popDebugGroup();
++        } else if (dstLocation.type == RenderTextureCopyType::PLACED_FOOTPRINT && srcLocation.type == RenderTextureCopyType::SUBRESOURCE) {
++            assert(dstBuffer != nullptr && srcTexture != nullptr);
++            const uint32_t block = RenderFormatBlockWidth(srcTexture->desc.format);
++            const uint32_t bytesPerRow = ((dstLocation.placedFootprint.rowWidth + block - 1) / block) * RenderFormatSize(srcTexture->desc.format);
++            const uint32_t bytesPerImage = bytesPerRow * ((dstLocation.placedFootprint.height + block - 1) / block);
++            const MTL::Origin origin = srcBox ? MTL::Origin{NS::UInteger(srcBox->left), NS::UInteger(srcBox->top), NS::UInteger(srcBox->front)} : MTL::Origin{0,0,0};
++            const MTL::Size size = srcBox ? MTL::Size{NS::UInteger(srcBox->right-srcBox->left), NS::UInteger(srcBox->bottom-srcBox->top), NS::UInteger(srcBox->back-srcBox->front)}
++                : MTL::Size{dstLocation.placedFootprint.width, dstLocation.placedFootprint.height, dstLocation.placedFootprint.depth};
++            activeBlitEncoder->copyFromTexture(srcTexture->mtl, srcLocation.subresource.arrayIndex,
++                srcLocation.subresource.mipLevel, origin, size, dstBuffer->mtl,
++                dstLocation.placedFootprint.offset, bytesPerRow, bytesPerImage);
+         } else {
+             assert(dstTexture != nullptr);
+             assert(srcTexture != nullptr);
+@@ -3034,7 +3041,10 @@
+                 size = { NS::UInteger(srcBox->right - srcBox->left), NS::UInteger(srcBox->bottom - srcBox->top), NS::UInteger(srcBox->back - srcBox->front) };
+             } else {
+                 srcOrigin = { 0, 0, 0 };
+-                size = { srcTexture->desc.width, srcTexture->desc.height, srcTexture->desc.depth };
++                const uint32_t mip = srcLocation.subresource.mipLevel;
++                size = { std::max(1u, srcTexture->desc.width >> mip),
++                    std::max(1u, srcTexture->desc.height >> mip),
++                    std::max(1u, srcTexture->desc.depth >> mip) };
+             }
+ 
+             const MTL::Origin dstOrigin = { dstX, dstY, dstZ };
+@@ -3885,6 +3895,10 @@
+         clearColorFunction->release();
+         clearDepthFunction->release();
+         sharedBlitDescriptor->release();
++        clearColorDepthState->release();
++        clearDepthState->release();
++        clearStencilState->release();
++        clearDepthStencilState->release();
+ 
+         nullBuffer.reset();
+ 
+@@ -4134,6 +4148,7 @@
+         stencilDescriptor->setWriteMask(0xFFFFFFFF);
+ 
+         MTL::DepthStencilDescriptor *depthDescriptor = MTL::DepthStencilDescriptor::alloc()->init();
++        clearColorDepthState = mtl->newDepthStencilState(depthDescriptor);
+ 
+         depthDescriptor->setDepthWriteEnabled(true);
+         depthDescriptor->setDepthCompareFunction(MTL::CompareFunctionAlways);
+--- a/plume_metal.h
++++ b/plume_metal.h
+@@ -708,6 +708,7 @@
+         MTL::Function* clearColorFunction;
+         MTL::Function* clearDepthFunction;
+         MTL::Function* clearStencilFunction;
++        MTL::DepthStencilState *clearColorDepthState;
+         MTL::DepthStencilState *clearDepthState;
+         MTL::DepthStencilState *clearStencilState;
+         MTL::DepthStencilState *clearDepthStencilState;

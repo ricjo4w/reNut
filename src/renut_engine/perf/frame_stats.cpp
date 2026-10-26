@@ -4,6 +4,8 @@
 #include <chrono>
 #include <mutex>
 #include <thread>
+#include <cstdio>
+#include <filesystem>
 
 #include <rex/cvar.h>
 #include <rex/hook.h>
@@ -12,6 +14,9 @@ REXCVAR_DEFINE_BOOL(fps_overlay, false, "Nuts&Bolts/Performance",
     "Shows the FPS overlay (toggle with F1).");
 REXCVAR_DEFINE_DOUBLE(fps_overlay_size, 34.0, "Nuts&Bolts/Performance",
     "Text size of the FPS overlay's frame rate, in pixels; the rest scales with it.");
+REXCVAR_DEFINE_STRING(renut_frame_csv, "", "Nuts&Bolts/Debug",
+    "Optional frame-time CSV path for sustained performance measurements. Empty disables recording.")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 void renutFrameLimit();  // frameHooks.cpp
 
@@ -68,6 +73,31 @@ double MsSince(Clock::time_point start) {
     return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 }
 
+void TraceFrame(double frame_ms, double cpu_ms, double gpu_ms, double render_thread_ms) {
+    struct Trace {
+        FILE *file = nullptr;
+        uint64_t frame = 0;
+        Clock::time_point start = Clock::now();
+        Trace() {
+            const std::string path = REXCVAR_GET(renut_frame_csv);
+            if (path.empty()) return;
+            std::error_code error;
+            const auto parent = std::filesystem::path(path).parent_path();
+            if (!parent.empty()) std::filesystem::create_directories(parent, error);
+            file = std::fopen(path.c_str(), "w");
+            if (file) std::fputs("frame,elapsed_s,frame_ms,cpu_ms_delayed,gpu_ms_delayed,render_thread_ms_delayed\n", file);
+        }
+        ~Trace() { if (file) std::fclose(file); }
+    };
+    static Trace trace;
+    if (!trace.file) return;
+    std::fprintf(trace.file, "%llu,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+        static_cast<unsigned long long>(++trace.frame), MsSince(trace.start) / 1000.0,
+        frame_ms, cpu_ms, gpu_ms, render_thread_ms);
+    // Keep disk writes outside the statistics mutex; flush once a second of frames.
+    if (trace.frame % 60 == 0) std::fflush(trace.file);
+}
+
 } // namespace
 
 void OnGpuFrame(double ms) {
@@ -88,16 +118,21 @@ void OnGameThreadWait(double ms) {
 
 void OnGameFrame() {
     const Clock::time_point now = Clock::now();
-    std::lock_guard lock(g_mutex);
-    if (g_have_frame) {
-        g_ring[g_ring_next] =
-            float(std::chrono::duration<double, std::milli>(now - g_last_frame).count());
+    double frame_ms = 0.0, cpu = 0.0, gpu = 0.0, render_thread = 0.0;
+    {
+      std::lock_guard lock(g_mutex);
+      if (g_have_frame) {
+        frame_ms = std::chrono::duration<double, std::milli>(now - g_last_frame).count();
+        g_ring[g_ring_next] = float(frame_ms);
         g_ring_next = (g_ring_next + 1) % Snapshot::kHistory;
         if (g_ring_count < Snapshot::kHistory)
             ++g_ring_count;
+      }
+      g_last_frame = now;
+      g_have_frame = true;
+      cpu = g_cpu.Average(1); gpu = g_gpu.Average(1); render_thread = g_render_thread.Average(1);
     }
-    g_last_frame = now;
-    g_have_frame = true;
+    if (frame_ms > 0.0) TraceFrame(frame_ms, cpu, gpu, render_thread);
 }
 
 Snapshot Get() {

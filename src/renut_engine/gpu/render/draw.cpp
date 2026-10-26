@@ -105,7 +105,7 @@ struct SharedConstants {
   // 1344: in guest pixels, what the pixel position is relative to: a draw
   // predicated to one tile has the tile's corner (ViewportState::pixel_origin).
   float pixel_origin[2];
-  float pad_1352[2];
+  uint64_t metal_indices; // Metal primitive expansion: optional uint32 index array.
 };
 static_assert(offsetof(SharedConstants, sampler_indices) == 384);
 static_assert(offsetof(SharedConstants, booleans) == 512);
@@ -793,7 +793,7 @@ bool GatherTargets(const GuestDevice &device, Targets &t) {
   // sets (the garage's vehicle database: a 320x288 color target over a 288x180
   // depth surface) and draws within the smaller one, which the console and
   // D3D12 allow. Those attachments are grown to cover it.
-  if (IsVulkan() && t.color_count) {
+  if (UsesDeviceAddresses() && t.color_count) {
     const uint32_t host_width = first->scale.Size(first->width);
     const uint32_t host_height = first->scale.Size(first->height);
     for (uint32_t i = 1; i < t.color_count; ++i)
@@ -1378,7 +1378,7 @@ void TrackIndices(const IndexKey &key, u32 lo, u32 max_index) {
 bool PrepareGeometry(const GuestDevice &device, const DrawCall &call, Geometry &g) {
   const bool expand = call.primitive == kTriangleFan || call.primitive == kQuadList;
   static uint32_t rect_logged = 0;
-  if (call.primitive == kRectangleList && !State().rectangle_list_gs && LogLimited(rect_logged, 1))
+  if (call.primitive == kRectangleList && !IsMetal() && !State().rectangle_list_gs && LogLimited(rect_logged, 1))
     RGPU_WARN("Rectangle lists are drawn as triangle lists");
 
   u32 lo = 0, max_index = 0;  // host indices are g_indices - lo, the largest max_index
@@ -1406,7 +1406,8 @@ bool PrepareGeometry(const GuestDevice &device, const DrawCall &call, Geometry &
       // Draw*IndexedPrimitiveUP indices are the game's own memory, only valid
       // during the call; these are an index buffer's.
       index_key = IndexKey{src, call.count, call.primitive, endian, is32};
-      cacheable_indices = call.count <= kMaxDrawIndices;
+      cacheable_indices = call.count <= kMaxDrawIndices &&
+          !(IsMetal() && (call.primitive == kRectangleList || call.primitive == kPointList));
       if (cacheable_indices && CachedIndexDraw(index_key, call, g))
         return true;
     }
@@ -1708,7 +1709,8 @@ u32 DescribeBoundFetches(const GuestDevice &device, const DrawCall &call, const 
   const ShaderVertexInput *inputs = g_shaderVertexInputs + vs.entry->vertexInputOffset;
   const u32 count = std::min<u32>(vs.entry->vertexInputCount, kMaxBoundFetches);
   for (u32 i = 0; i < count; ++i) {
-    if (!(inputs[i].flags & kVertexInputBoundFetch))
+    if (!(inputs[i].flags & kVertexInputBoundFetch) &&
+        !(IsMetal() && (call.primitive == kRectangleList || call.primitive == kPointList)))
       continue;
     for (const GuestVertexElement &e : declaration.elements) {
       if (e.Usage != inputs[i].usage || e.UsageIndex != inputs[i].usageIndex)
@@ -1874,7 +1876,7 @@ UploadAllocation UploadVertexFetchData(const GuestDevice &device, const DrawCall
     cmd->barriers(plume::RenderBarrierStage::GRAPHICS, to_copy + 1, barrier_count - 1);
   g_bound.framebuffer = nullptr;  // the copies end any render pass
   alloc.ref = plume::RenderBufferReference(dest, region);
-  alloc.gpu_address = IsVulkan() ? dest->getDeviceAddress() + region : 0;
+  alloc.gpu_address = UsesDeviceAddresses() ? dest->getDeviceAddress() + region : 0;
   sc.vertex_fetch_data = alloc.gpu_address;
   return alloc;
 }
@@ -1909,7 +1911,7 @@ PipelineKey MakeKey(const GuestDevice &device, const ShaderRecord *vs, const Sha
   key.mode_control = u32(cp.ModeControl) & 0x7;
   key.alpha_to_coverage = (u32(cp.ColorControl) >> 4) & 1;
   if (primitive == kRectangleList) {
-    if (State().rectangle_list_gs)
+    if (State().rectangle_list_gs || IsMetal())
       key.rectangle_list = 1;
     // Rectangles are not culled. N&B's D3D clears through rectangles
     // (ClearRects_D3D, 0x822043D8) whose corners run clockwise on screen, under
@@ -1919,8 +1921,10 @@ PipelineKey MakeKey(const GuestDevice &device, const ShaderRecord *vs, const Sha
     // frame's final image back into the bloom, which grew to white.
     key.mode_control &= ~3u;
   }
-  if (primitive == kPointList && State().point_sprite_gs)
+  if (primitive == kPointList && (State().point_sprite_gs || IsMetal()))
     key.point_sprite = 1;
+  if (IsMetal() && (key.rectangle_list || key.point_sprite))
+    key.topology = plume::RenderPrimitiveTopology::TRIANGLE_LIST;
   if (per_instance) {
     key.per_instance_streams = 1;
     // Which way the tessellated grid winds depends on how the shader weights
@@ -2886,8 +2890,17 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     std::memset(sc.memexport_streams, 0, sizeof(sc.memexport_streams));
   }
   plume::RenderBuffer *memexport = MemExportBufferLocked(s);
-  if (memexport && IsVulkan())
+  if (memexport && UsesDeviceAddresses())
     sc.memexport_address = memexport->getDeviceAddress();
+  const bool metal_expand = IsMetal() && (call.primitive == kRectangleList || call.primitive == kPointList);
+  if (metal_expand && geometry.indexed) {
+    const auto indices = Video::UploadsLocked().Allocate(g_indices.size() * sizeof(u32), 16);
+    if (!indices) return false;
+    const u32 lo = geometry.first_vertex - u32(call.base_vertex);
+    auto *out = static_cast<u32 *>(indices.cpu);
+    for (size_t i = 0; i < g_indices.size(); ++i) out[i] = g_indices[i] - lo;
+    sc.metal_indices = indices.gpu_address;
+  }
   UploadAllocation sc_alloc = Video::UploadsLocked().Upload(&sc, sizeof(sc), 256);
   if (!fetch_alloc || !vs_alloc || !ps_alloc || !sc_alloc || !memexport)
     return false;
@@ -2928,7 +2941,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   }
   float blend_constant[4];
   if (DrawBlendConstant(dev, key, blend_constant) &&
-      !(g_bound.blend_constant_set &&
+      !(g_bound.blend_constant_set && !IsMetal() &&
         std::memcmp(blend_constant, g_bound.blend_constant, sizeof(blend_constant)) == 0)) {
     if (SetBlendConstant(cmd, blend_constant)) {
       std::memcpy(g_bound.blend_constant, blend_constant, sizeof(blend_constant));
@@ -2941,7 +2954,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
       }
     }
   }
-  if (IsVulkan()) {
+  if (UsesDeviceAddresses()) {
     const DrawPushConstants push{vs_alloc.gpu_address, ps_alloc.gpu_address, sc_alloc.gpu_address};
     cmd->setGraphicsPushConstants(0, &push, 0, sizeof(push));
   } else {
@@ -2952,11 +2965,14 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     SetRootDescriptor(cmd, plume::RenderBufferReference(memexport), kDrawRootMemExport);
   }
 
-  if (!BindStreams(device, call, *vs, shader_strides, declaration->layout,
+  if (!metal_expand && !BindStreams(device, call, *vs, shader_strides, declaration->layout,
                    declaration->layout_hash, geometry, gpu_streams)) {
     return false;
   }
-  if (geometry.indexed) {
+  if (metal_expand) {
+    const u32 count = geometry.indexed ? geometry.index_count : geometry.vertex_count;
+    cmd->drawInstanced(call.primitive == kRectangleList ? (count / 3) * 6 : count * 6, 1, 0, 0);
+  } else if (geometry.indexed) {
     SetIndexBuffer(cmd, geometry.index_view);
     cmd->drawIndexedInstanced(geometry.index_count, 1, 0, 0, 0);
   } else {

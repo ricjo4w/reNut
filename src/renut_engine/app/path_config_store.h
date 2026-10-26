@@ -38,7 +38,7 @@ namespace PathConfigStore {
     // Next to the executable (the user data folder for an AppImage, whose
     // own folder is read-only; see app_paths.h).
     inline std::filesystem::path GetStorePath(const std::string& app_name) {
-        if (renut::paths::IsAppImage())
+        if (renut::paths::UsesUserFolder())
             return renut::paths::WritableFolder() / (app_name + ".cfg");
 #if defined(_WIN32)
         wchar_t exe_path[MAX_PATH] = {};

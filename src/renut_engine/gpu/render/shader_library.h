@@ -22,7 +22,7 @@ const ShaderCacheEntry *FindShaderEntry(uint64_t hash);
 // Builds the active backend's shader from a cache entry (decompressing the
 // cache on first use). nullptr on failure.
 std::unique_ptr<plume::RenderShader> CreateCachedShader(plume::RenderDevice *device,
-                                                        const ShaderCacheEntry &entry);
+                                                        const ShaderCacheEntry &entry, uint32_t variant = 0);
 
 // For a shader FindShaderEntry did not find (the game compiles a few at
 // runtime, which no dump of its files has): writes its container to the

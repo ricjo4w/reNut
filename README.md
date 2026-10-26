@@ -22,7 +22,7 @@ About
 
 What's currently supported?
 -----------------------------------------
-currently the only devices supported are linux devices and windows devices, i have not gotten around to adding metal support for mac nor do i know if itll be worth it (if you use a mac like i said above, its open source, you're free to fork it)
+Upstream supports Windows and Linux. This fork is developing native ARM64 macOS and Metal support; see [Apple Silicon build and validation status](docs/apple-silicon.md).
 
 
 

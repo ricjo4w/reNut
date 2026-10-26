@@ -142,9 +142,17 @@ std::unique_ptr<plume::RenderPipeline> Build(const PipelineKey &key, const Pipel
   desc.pipelineLayout = s.draw_layout.get();
   desc.vertexShader = inputs.vertex_shader;
   desc.pixelShader = inputs.pixel_shader;
-  if (key.rectangle_list)
+  std::unique_ptr<plume::RenderShader> expanded_vertex;
+  const bool expanded = IsMetal() && (key.rectangle_list || key.point_sprite);
+  if (expanded) {
+    expanded_vertex = CreateCachedShader(s.device.get(),
+        *static_cast<const ShaderCacheEntry *>(key.vertex_shader), key.rectangle_list ? 1 : 2);
+    if (!expanded_vertex) return nullptr;
+    desc.vertexShader = expanded_vertex.get();
+  }
+  if (key.rectangle_list && !IsMetal())
     desc.geometryShader = s.rectangle_list_gs.get();
-  if (key.point_sprite)
+  if (key.point_sprite && !IsMetal())
     desc.geometryShader = s.point_sprite_gs.get();
   desc.primitiveTopology = key.topology;
 
@@ -208,6 +216,10 @@ std::unique_ptr<plume::RenderPipeline> Build(const PipelineKey &key, const Pipel
   desc.inputSlotsCount = slot_count;
   desc.inputElements = layout.input_elements.data();
   desc.inputElementsCount = uint32_t(layout.input_elements.size());
+  if (expanded) {
+    desc.inputElementsCount = 0;
+    desc.inputSlotsCount = 0;
+  }
 
   std::unique_ptr<plume::RenderPipeline> pipeline;
 #if defined(_WIN32)
@@ -590,7 +602,7 @@ bool BuildDrawLayout(VideoState &s) {
   layout.addDescriptorSet(textures);  // space2 TextureCube[]
   layout.addDescriptorSet(samplers);  // space3 SamplerState[]
   layout.addDescriptorSet(textures);  // space4 Texture2DArray[] (stacked textures)
-  if (IsVulkan()) {
+  if (UsesDeviceAddresses()) {
     // Geometry too: point_sprite_gs reads SharedConstants.
     layout.addPushConstant(0, 4, sizeof(DrawPushConstants),
                            plume::RenderShaderStageFlag::VERTEX | plume::RenderShaderStageFlag::GEOMETRY |

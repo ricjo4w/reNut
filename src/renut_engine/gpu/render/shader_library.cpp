@@ -1,3 +1,7 @@
+#if defined(__APPLE__)
+#include "renut_engine/gpu/shaders/metal_cache.h"
+#include <zlib.h>
+#endif
 /**
  * @file    gpu/render/shader_library.cpp
  */
@@ -85,10 +89,31 @@ const ShaderCacheEntry *FindShaderEntry(uint64_t hash) {
 }
 
 std::unique_ptr<plume::RenderShader> CreateCachedShader(plume::RenderDevice *device,
-                                                        const ShaderCacheEntry &entry) {
+                                                        const ShaderCacheEntry &entry, uint32_t variant) {
   if (!device)
     return nullptr;
 
+#if defined(__APPLE__)
+  const auto *end = g_metal_cache + g_metal_cache_count;
+  const auto key = std::pair{entry.hash, variant};
+  const auto *found = std::lower_bound(g_metal_cache, end, key,
+      [](const MetalCacheEntry &a, const auto &key) { return std::pair{a.hash, a.variant} < key; });
+  if (found == end || found->hash != entry.hash || found->variant != variant) return nullptr;
+  static std::once_flag metal_once;
+  static std::vector<unsigned char> metal_bytes;
+  std::call_once(metal_once, [] {
+    metal_bytes.resize(g_metal_cache_size);
+    uLongf size = metal_bytes.size();
+    if (uncompress(metal_bytes.data(), &size, g_metal_cache_bytes, g_metal_cache_compressed_size) != Z_OK ||
+        size != g_metal_cache_size) {
+      RGPU_ERROR("Metal shader cache decompression failed");
+      metal_bytes.clear();
+    }
+    g_decompressed_bytes.fetch_add(metal_bytes.capacity(), std::memory_order_relaxed);
+  });
+  if (found->offset > metal_bytes.size() || found->size > metal_bytes.size() - found->offset) return nullptr;
+  return device->createShader(metal_bytes.data() + found->offset, found->size, "renut_main", plume::RenderShaderFormat::METAL);
+#endif
   if (IsVulkan()) {
     const uint8_t *cache = Decompress(g_spirv, g_compressedSpirvCache, g_spirvCacheCompressedSize,
                                       g_spirvCacheDecompressedSize, "SPIR-V");

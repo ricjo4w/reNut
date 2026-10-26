@@ -24,8 +24,20 @@ inline bool IsAppImage() {
 #endif
 }
 
+inline bool UsesUserFolder() {
+#if defined(__APPLE__)
+	return true;
+#else
+	return IsAppImage();
+#endif
+}
+
 inline std::filesystem::path WritableFolder() {
-	if (IsAppImage())
+#if defined(__APPLE__)
+	if (const char *home = std::getenv("HOME"); home && *home)
+		return std::filesystem::path(home) / "Library/Application Support/renut";
+#endif
+	if (UsesUserFolder())
 		return rex::filesystem::GetUserFolder() / "renut";
 	return rex::filesystem::GetExecutableFolder();
 }
@@ -33,7 +45,7 @@ inline std::filesystem::path WritableFolder() {
 // Once, before anything is written: creates the folder and, for an AppImage,
 // makes it the working directory.
 inline void PrepareWritableFolder() {
-	if (!IsAppImage())
+	if (!UsesUserFolder())
 		return;
 	std::error_code ec;
 	const std::filesystem::path folder = WritableFolder();

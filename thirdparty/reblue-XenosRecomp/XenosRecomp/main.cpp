@@ -4,6 +4,7 @@
 
 #include <mutex>
 #include <vector>
+#include <thread>
 
 static std::unique_ptr<uint8_t[]> readAllBytes(const char* filePath, size_t& fileSize)
 {
@@ -29,6 +30,9 @@ struct RecompiledShader
     uint8_t* data = nullptr;
     IDxcBlob* dxil = nullptr;
     std::vector<uint8_t> spirv;
+#if defined(__APPLE__) && defined(RENUT_RECOMP)
+    std::vector<uint8_t> metalSpirv[3];
+#endif
     uint32_t specConstantsMask = 0;
 #ifdef RENUT_RECOMP
     uint32_t vertexFetchMemoryMask = 0;
@@ -40,6 +44,10 @@ struct RecompiledShader
     std::string sourceName;
 #endif
 };
+
+#if defined(__APPLE__) && defined(RENUT_RECOMP)
+#include "mac_shader_cache.h"
+#endif
 
 // Per-shader recompile failures, collected from the parallel loop and reported before exit.
 struct ShaderFailure
@@ -165,11 +173,27 @@ int main(int argc, char** argv)
 #endif
 
         std::atomic<uint32_t> progress = 0;
+#if defined(__APPLE__) && defined(RENUT_RECOMP)
+        const auto metalDir = std::filesystem::path(output).parent_path() / "metal_spirv";
+        std::filesystem::create_directories(metalDir);
+        const uint64_t fingerprint = macCompilerFingerprint(include);
+        const auto cacheDir = std::filesystem::path(output).parent_path() / "xenos_cache" / fmt::format("{:016x}", fingerprint);
+        std::filesystem::create_directories(cacheDir);
+        const bool seedCache = std::getenv("XENOS_RECOMP_SEED_CACHE") && std::string_view(std::getenv("XENOS_RECOMP_SEED_CACHE")) == "1";
+#endif
 
-        std::for_each(std::execution::par_unseq, shaders.begin(), shaders.end(), [&](auto& hashShaderPair)
+        auto compileShader = [&](auto& hashShaderPair)
             {
                 auto& shader = hashShaderPair.second;
                 const XXH64_hash_t hash = hashShaderPair.first;
+#if defined(__APPLE__) && defined(RENUT_RECOMP)
+                const auto cacheFile = cacheDir / fmt::format("{:016x}.cache", hash);
+                if (hlslDumpDir.empty() && loadMacShader(cacheFile, shader)) {
+                    writeMetalSpirv(metalDir, hash, shader);
+                    ++progress;
+                    return;
+                }
+#endif
 
                 auto recordFailure = [hash](const char* reason)
                 {
@@ -209,6 +233,13 @@ int main(int argc, char** argv)
 #endif
 
                 thread_local DxcCompiler dxcCompiler;
+#if defined(__APPLE__) && defined(RENUT_RECOMP)
+                if (seedCache && seedMacShader(metalDir, hash, recompiler.isPixelShader, shader)) {
+                    saveMacShader(cacheFile, shader);
+                    ++progress;
+                    return;
+                }
+#endif
 
 #ifdef XENOS_RECOMP_DXIL
                 shader.dxil = dxcCompiler.compile(recompiler.out, recompiler.isPixelShader, recompiler.specConstantsMask != 0, false);
@@ -238,12 +269,47 @@ int main(int argc, char** argv)
                     return;
                 }
 
+#if defined(__APPLE__) && defined(RENUT_RECOMP)
+                const auto *metalBytes = static_cast<const uint8_t *>(spirv->GetBufferPointer());
+                shader.metalSpirv[0].assign(metalBytes, metalBytes + spirv->GetBufferSize());
+                if (!recompiler.isPixelShader) {
+                    for (int mode = 1; mode <= 2; ++mode) {
+                        IDxcBlob *expanded = dxcCompiler.compile(recompiler.out, false, false, true, mode);
+                        if (!expanded) { recordFailure("metal-primitive-expansion-failed"); spirv->Release(); return; }
+                        const auto *bytes = static_cast<const uint8_t *>(expanded->GetBufferPointer());
+                        shader.metalSpirv[mode].assign(bytes, bytes + expanded->GetBufferSize());
+                        expanded->Release();
+                    }
+                }
+                writeMetalSpirv(metalDir, hash, shader);
+                saveMacShader(cacheFile, shader);
+#endif
+
                 spirv->Release();
 
                 size_t currentProgress = ++progress;
                 if ((currentProgress % 10) == 0 || (currentProgress == shaders.size() - 1))
                     fmt::println("Recompiling shaders... {}%", currentProgress / float(shaders.size()) * 100.0f);
+            };
+#if defined(__APPLE__)
+        // libc++'s parallel algorithms use a serial backend on macOS. DXC owns
+        // one compiler per thread; bound concurrency to keep memory predictable.
+        std::vector<decltype(shaders)::value_type *> jobs;
+        for (auto &shader : shaders) jobs.push_back(&shader);
+        std::atomic<size_t> next{0};
+        std::vector<std::thread> workers;
+        for (unsigned i = 0; i < std::min(4u, std::max(1u, std::thread::hardware_concurrency())); ++i)
+            workers.emplace_back([&] {
+                for (;;) {
+                    const size_t index = next.fetch_add(1);
+                    if (index >= jobs.size()) break;
+                    compileShader(*jobs[index]);
+                }
             });
+        for (auto &worker : workers) worker.join();
+#else
+        std::for_each(std::execution::par_unseq, shaders.begin(), shaders.end(), compileShader);
+#endif
 
         if (!g_failures.empty())
         {

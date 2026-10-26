@@ -11,6 +11,10 @@
 #include <utility>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <Foundation/Foundation.hpp>
+#endif
+
 #include "renut_engine/perf/frame_stats.h"
 #include "renut_engine/gpu/guest/guest_memory.h"
 #include "renut_engine/gpu/log.h"
@@ -75,6 +79,12 @@ Clock::duration g_waited{};
 thread_local bool t_render_thread = false;
 
 void Execute(Item &item) {
+#if defined(__APPLE__)
+  // Native blend/stencil updates may start a Metal encoder before Plume's
+  // public draw call opens its own pool. Drain those temporary Cocoa objects
+  // after each work item, including work executed during shutdown.
+  auto pool = NS::TransferPtr(NS::AutoreleasePool::alloc()->init());
+#endif
   if (item.locked) {
     std::lock_guard lock(State().mutex);
     item.work();

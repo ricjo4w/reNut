@@ -2093,7 +2093,12 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 
     out += "#endif\n";
 
-    out += "void main(\n";
+#ifdef RENUT_RECOMP
+    if (!isPixelShader)
+        out += "#ifdef RENUT_METAL_EXPANSION\nvoid renut_vertex(\n#else\nvoid main(\n#endif\n";
+    else
+#endif
+        out += "void main(\n";
 
     if (isPixelShader)
     {
@@ -3199,4 +3204,74 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 #endif
 
     out += "}";
+#ifdef RENUT_RECOMP
+    if (!isPixelShader) {
+        out += "\n#ifdef RENUT_METAL_EXPANSION\nstruct RenutMetalVertex {\nfloat4 position : SV_Position;\n";
+        for (auto &[usage, index] : INTERPOLATORS)
+            println("float4 {0}{1} : {2}{1};", USAGE_VARIABLES[uint32_t(usage)], index, USAGE_SEMANTICS[uint32_t(usage)]);
+        out += "float2 pointCoord : POINTCOORD;\nfloat pointSize : POINTSIZE;\n};\n";
+        out += "RenutMetalVertex RenutEval(uint id) {\nRenutMetalVertex v;\nrenut_vertex(\n";
+        const auto *vs = reinterpret_cast<const VertexShader *>(shader);
+        std::unordered_set<uint32_t> seen;
+        for (uint32_t i = 0; i < vs->vertexElementCount; ++i) {
+            union { VertexElement e; uint32_t word; };
+            word = vs->vertexElementsAndInterpolators[vs->field18 + i];
+            const uint32_t semantic = uint32_t(e.usage) * 256 + uint32_t(e.usageIndex);
+            if (!seen.insert(semantic).second) continue;
+            size_t slot = 0;
+            while (slot < vertexInputs.size() &&
+                !(vertexInputs[slot].usage == uint8_t(e.usage) && vertexInputs[slot].usageIndex == uint8_t(e.usageIndex))) ++slot;
+            if (slot < vertexInputs.size() && slot < MAX_BOUND_FETCHES)
+                println("vfetchBound(g_BoundFetch({0}), g_VertexFetchSlot(g_BoundFetch({0}).x), float(id + g_Tessellation.w), false, false, 0),", slot);
+            else
+                out += "float4(0, 0, 0, 1),\n";
+        }
+        out += "id, 0, v.position";
+        for (auto &[usage, index] : INTERPOLATORS)
+            print(", v.{}{}", USAGE_VARIABLES[uint32_t(usage)], index);
+        out += ", v.pointCoord, v.pointSize);\nreturn v;\n}\n";
+        out += "RenutMetalVertex RenutOpposite(RenutMetalVertex a, RenutMetalVertex b, RenutMetalVertex c) {\nRenutMetalVertex v;\nv.position = a.position + b.position - c.position;\n";
+        for (auto &[usage, index] : INTERPOLATORS)
+            println("v.{0}{1} = a.{0}{1} + b.{0}{1} - c.{0}{1};", USAGE_VARIABLES[uint32_t(usage)], index);
+        out += R"(
+v.pointCoord = a.pointCoord + b.pointCoord - c.pointCoord;
+v.pointSize = a.pointSize + b.pointSize - c.pointSize;
+return v;
+}
+uint RenutIndex(uint id) {
+    uint64_t address = vk::RawBufferLoad<uint64_t>(g_PushConstants.SharedConstants + 1352, 8);
+    return address ? vk::RawBufferLoad<uint>(address + id * 4, 4) : id;
+}
+RenutMetalVertex main(uint id : SV_VertexID) {
+    const uint cornerMap[6] = {0, 1, 2, 2, 1, 3};
+    uint corner = cornerMap[id % 6];
+#if RENUT_METAL_EXPANSION == 1
+    RenutMetalVertex p[3];
+    [unroll] for (uint i = 0; i < 3; ++i) p[i] = RenutEval(RenutIndex((id / 6) * 3 + i));
+    float2 s0 = p[0].position.xy / p[0].position.w;
+    float2 s1 = p[1].position.xy / p[1].position.w;
+    float2 s2 = p[2].position.xy / p[2].position.w;
+    float3 skew = abs(float3(dot(s1-s0, s2-s0), dot(s2-s1, s0-s1), dot(s0-s2, s1-s2)));
+    uint c = skew.y < skew.x && skew.y <= skew.z ? 1 : skew.z < skew.x && skew.z < skew.y ? 2 : 0;
+    if (corner < 3) return p[(c + corner) % 3];
+    return RenutOpposite(p[(c+1)%3], p[(c+2)%3], p[c]);
+#else
+    RenutMetalVertex v = RenutEval(RenutIndex(id / 6));
+    float4 state = vk::RawBufferLoad<float4>(g_PushConstants.SharedConstants + 1312, 16);
+    float2 size = v.pointSize > 0 ? v.pointSize.xx : state.xy;
+    if (state.w > 0) size = min(size, state.w);
+    size = max(size, state.z);
+    const float2 positions[4] = {float2(-1,1), float2(1,1), float2(-1,-1), float2(1,-1)};
+    const float2 coords[4] = {float2(0,0), float2(1,0), float2(0,1), float2(1,1)};
+    // DXC flips the final vertex Y; this runs before that transform.
+    v.position.xy += positions[corner] * size / g_ViewportSize * v.position.w;
+    v.pointCoord = coords[corner];
+    if (v.pointSize < 0) v.position = float4(0,0,0,0);
+    return v;
+#endif
+}
+#endif
+)";
+    }
+#endif
 }

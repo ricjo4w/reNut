@@ -10,6 +10,9 @@
 #include "renut_engine/gpu/overlay/app_integration.h"
 #include "renut_engine/app/crash_dump.h"
 #include "renut_engine/app/app_paths.h"
+#if defined(__APPLE__)
+#include "renut_engine/app/audio_clients_macos.h"
+#endif
 #include "renut_engine/mods/mod_loader.h"
 #include "renut_engine/game/mouse_camera.h"
 #include "renut_engine/game/keyboard_input.h"
@@ -30,13 +33,25 @@ public:
     // renut.toml and the logs go where reNut can write: next to the
     // executable, or the user data folder when running as an AppImage.
     void OnConfigurePaths(rex::PathConfig& paths) override {
-        if (renut::paths::IsAppImage())
+        if (renut::paths::UsesUserFolder())
             paths.config_path = renut::paths::WritableFolder() / (app_name_ + ".toml");
+#if defined(__APPLE__)
+        // SDK 0.10's POSIX defaults use ~/.local/share on Mac as well.
+        // Preserve explicit overrides, but keep default saves and caches with
+        // the launcher's Application Support directory.
+        const auto sdk_default = rex::filesystem::GetUserFolder() / app_name_;
+        if (paths.user_data_root == sdk_default) {
+            paths.user_data_root = renut::paths::WritableFolder();
+            if (paths.cache_root == sdk_default / "cache")
+                paths.cache_root = renut::paths::WritableFolder() / "cache";
+        }
+#endif
         config_path_ = paths.config_path;
     }
 
-    void OnConfigureLogging(rex::LogConfig& config) override {
-        if (renut::paths::IsAppImage())
+    // SDK releases predating this hook use cmake/sdk_compat.cmake.
+    void OnConfigureLogging(rex::LogConfig& config) {
+        if (renut::paths::UsesUserFolder())
             config.log_dir = renut::paths::WritableFolder() / "logs";
     }
 
@@ -104,6 +119,9 @@ public:
     // Native renderer: the SDK runs without its GPU backend and the overlay is
     // drawn by renut::gpu.
     void OnPreSetup(rex::RuntimeConfig& config) override {
+#if defined(__APPLE__)
+        renut::audio::InstallMacClientHooks();
+#endif
         renut::gpu::ConfigureRuntime(config);
     }
 

@@ -23,6 +23,10 @@
 #include "renut_engine/gpu/backend/video.h"
 
 #include "host_shaders/overlay_ps.spirv.h"
+#if defined(__APPLE__)
+#include "host_shaders/overlay_vs.metal.h"
+#include "host_shaders/overlay_ps.metal.h"
+#endif
 #include "host_shaders/overlay_vs.spirv.h"
 #if defined(_WIN32)
 #include "host_shaders/overlay_ps.dxil.h"

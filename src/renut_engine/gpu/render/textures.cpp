@@ -412,7 +412,9 @@ bool Upload(HostTexture &t, const TextureFetch &fetch, bool defer_read) {
       // box, and Vulkan allows no extent past the level (a compressed one ends
       // at the level's edge instead of a block's): the footprint is the level's
       // part there. D3D12 wants block-aligned footprints, cut by the box.
-      const bool vulkan = IsVulkan();
+      // Metal blits, like Vulkan copies, need the mip's actual extent at
+      // compressed texture edges rather than a block-rounded rectangle.
+      const bool vulkan = UsesDeviceAddresses();
       const uint32_t row_texels = row_pitch / t.info.host_block_bytes * bs;
       if (vulkan && d > 1 && copy_h != blocks_h * bs) {
         // The footprint's height is also its rows per depth slice there, which

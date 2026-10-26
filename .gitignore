@@ -38,6 +38,7 @@ cmake/eos_credentials.cmake
 # Build output and binaries
 # ---------------------------------------------------------------------------
 /out/
+/.deps/
 *.exe
 *.dll
 *.pdb

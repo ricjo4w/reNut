@@ -9,7 +9,24 @@ project(renut LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/rexglue.cmake")
+    message(FATAL_ERROR "Run rexglue codegen renut_manifest.toml first; see docs/apple-silicon.md")
+endif()
 include(generated/rexglue.cmake)
+if(APPLE)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/check_function_map.py"
+        "${CMAKE_SOURCE_DIR}/generated" RESULT_VARIABLE renut_mapping_error)
+    if(renut_mapping_error)
+        message(FATAL_ERROR "Cannot safely substitute the generated registration function")
+    endif()
+    list(REMOVE_ITEM REXGLUE_ENTRYPOINT_GENERATED_SOURCES "${CMAKE_SOURCE_DIR}/generated/renut_register.cpp")
+    list(APPEND REXGLUE_ENTRYPOINT_GENERATED_SOURCES "${CMAKE_SOURCE_DIR}/src/renut_engine/app/register_functions.cpp")
+    add_custom_target(renut_validate_function_map
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/check_function_map.py" "${CMAKE_SOURCE_DIR}/generated"
+        VERBATIM)
+    add_dependencies(renut_validate_function_map renut_codegen)
+endif()
 
 
 
@@ -57,6 +74,11 @@ else()
 endif()
 
 rexglue_setup_target(renut)
+if(APPLE)
+    add_dependencies(renut_recomp renut_validate_function_map)
+    target_sources(renut PRIVATE src/renut_engine/app/audio_clients_macos.cpp)
+endif()
+include(cmake/sdk_compat.cmake)
 
 # Lua 5.4 (thirdparty/lua-5.4.7, lua.org, MIT) for mods' part scripts
 # (src/renut_engine/game/part_scripts.cpp). Built as C++: script errors unwind
@@ -92,6 +114,9 @@ if(EXISTS "${RENUT_EOS_DIR}/Include/eos_sdk.h")
     if(WIN32)
         set(renut_eos_lib "${RENUT_EOS_DIR}/Lib/EOSSDK-Win64-Shipping.lib")
         set(renut_eos_runtime "${RENUT_EOS_DIR}/Bin/EOSSDK-Win64-Shipping.dll")
+    elseif(APPLE)
+        set(renut_eos_lib "${RENUT_EOS_DIR}/Bin/libEOSSDK-Mac-Shipping.dylib")
+        set(renut_eos_runtime "${renut_eos_lib}")
     else()
         set(renut_eos_lib "${RENUT_EOS_DIR}/Bin/libEOSSDK-Linux-Shipping.so")
         set(renut_eos_runtime "${renut_eos_lib}")
@@ -120,6 +145,20 @@ endif()
 # Native renderer (plume D3D12 + Vulkan, XenosRecomp RENUT_RECOMP shader cache).
 include(src/renut_engine/gpu/gpu.cmake)
 renut_gpu_setup(renut)
+if(APPLE)
+    add_executable(renut_controller_check tools/controller_check.cpp)
+    target_include_directories(renut_controller_check PRIVATE src)
+    target_link_libraries(renut_controller_check PRIVATE SDL3::SDL3-static)
+    add_dependencies(renut_controller_check renut_mac_sdl)
+    add_executable(renut_metal_smoke tools/metal_smoke.cpp
+        "${RENUT_GPU_GEN_DIR}/host_shaders/present_vs.metal.h"
+        "${RENUT_GPU_GEN_DIR}/host_shaders/present_ps.metal.h"
+        "${RENUT_GPU_GEN_DIR}/host_shaders/depth_resolve_ps.metal.h")
+    target_include_directories(renut_metal_smoke PRIVATE "${RENUT_GPU_GEN_DIR}")
+    renut_host_shader(renut_metal_smoke metal_address_smoke_cs cs_6_0)
+    target_link_libraries(renut_metal_smoke PRIVATE plume "-framework Metal" "-framework QuartzCore"
+        "-framework Foundation" "-framework AppKit" "-framework IOKit")
+endif()
 
 # Linux builds also pack renut into an AppImage (cmake/appimage.cmake).
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

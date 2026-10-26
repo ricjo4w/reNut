@@ -1,3 +1,12 @@
+#if defined(__APPLE__)
+#include "host_shaders/depth_resolve_ms_ps.metal.h"
+#include "host_shaders/depth_resolve_ps.metal.h"
+#include "host_shaders/present_ps.metal.h"
+#include "host_shaders/present_vs.metal.h"
+#include "host_shaders/stream_convert_cs.metal.h"
+#include "host_shaders/target_readback_cs.metal.h"
+#include "host_shaders/texture_mip_ps.metal.h"
+#endif
 /**
  * @file    gpu/backend/video.cpp
  * @brief   Device creation, bindless tables, resource retirement and command
@@ -248,14 +257,20 @@ bool BuildDepthResolvePipelines(VideoState &s) {
 // point sprites single pixels.
 void BuildRectangleListShader(VideoState &s) {
   if (!s.device->getCapabilities().geometryShader) {
+    if (IsMetal()) {
+      RGPU_INFO("Metal rectangle lists and point sprites use vertex expansion");
+      return;
+    }
     RGPU_WARN("No geometry shader support; rectangle lists are drawn as triangle lists and "
               "point sprites as points");
     return;
   }
+ #if !defined(__APPLE__)
   s.rectangle_list_gs =
       CreateHostShader(s.device.get(), RENUT_HOST_SHADER(rectangle_list_gs), "rectangle_list_gs");
   s.point_sprite_gs =
       CreateHostShader(s.device.get(), RENUT_HOST_SHADER(point_sprite_gs), "point_sprite_gs");
+ #endif
 }
 
 // See shaders/host/stream_convert_cs.hlsl.

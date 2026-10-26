@@ -12,6 +12,8 @@
 #if defined(_WIN32)
 #include <windows.h>
 #include <psapi.h>
+#elif defined(__APPLE__)
+#include <mach/mach.h>
 #endif
 
 #include <rex/cvar.h>
@@ -53,6 +55,14 @@ ProcessMemory QueryProcessMemory() {
     memory.valid = true;
     memory.private_bytes = counters.PrivateUsage;
     memory.resident_bytes = counters.WorkingSetSize;
+  }
+#elif defined(__APPLE__)
+  task_vm_info_data_t info{};
+  mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+  if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS) {
+    memory.valid = true;
+    memory.private_bytes = info.phys_footprint;
+    memory.resident_bytes = info.resident_size;
   }
 #elif defined(__linux__)
   // RssAnon: resident anonymous memory, the closest to Windows' private bytes.

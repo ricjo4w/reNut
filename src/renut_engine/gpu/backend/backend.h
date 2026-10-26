@@ -1,9 +1,9 @@
 /**
  * @file    gpu/backend/backend.h
- * @brief   Runtime choice between the D3D12 and Vulkan plume backends.
+ * @brief   Plume renderer backend and native API integration.
  *
  * Windows builds carry both backends and pick one at startup from the
- * renut_gpu_backend cvar. Other platforms are Vulkan only.
+ * renut_gpu_backend cvar. Linux uses Vulkan; macOS uses native Metal.
  */
 #pragma once
 
@@ -15,12 +15,14 @@
 
 namespace renut::gpu {
 
-enum class Backend { D3D12, Vulkan };
+enum class Backend { D3D12, Vulkan, Metal };
 
 // Resolved once from renut_gpu_backend on first call; stable afterwards, so a
 // change from the settings takes effect on the next start.
 Backend ActiveBackend();
 inline bool IsVulkan() { return ActiveBackend() == Backend::Vulkan; }
+inline bool IsMetal() { return ActiveBackend() == Backend::Metal; }
+inline bool UsesDeviceAddresses() { return IsVulkan() || IsMetal(); }
 const char *BackendName(Backend backend);
 
 plume::RenderShaderFormat HostShaderFormat();
@@ -81,6 +83,8 @@ struct HostShaderBlob {
   size_t spirv_size = 0;
   const uint8_t *dxil = nullptr;
   size_t dxil_size = 0;
+  const uint8_t *metal = nullptr;
+  size_t metal_size = 0;
 };
 
 std::unique_ptr<plume::RenderShader> CreateHostShader(plume::RenderDevice *device,
@@ -91,7 +95,10 @@ std::unique_ptr<plume::RenderShader> CreateHostShader(plume::RenderDevice *devic
 
 // RENUT_HOST_SHADER(overlay_vs) -> HostShaderBlob for gpu/shaders/host/overlay_vs.hlsl.
 // The including TU must include "host_shaders/<stem>.spirv.h" (and .dxil.h on Windows).
-#if defined(_WIN32)
+#if defined(__APPLE__)
+#define RENUT_HOST_SHADER(stem) \
+  ::renut::gpu::HostShaderBlob { nullptr, 0, nullptr, 0, g_##stem##_metal, sizeof(g_##stem##_metal) }
+#elif defined(_WIN32)
 #define RENUT_HOST_SHADER(stem)                                                    \
   ::renut::gpu::HostShaderBlob {                                                   \
     g_##stem##_spirv, sizeof(g_##stem##_spirv), g_##stem##_dxil, sizeof(g_##stem##_dxil) \
